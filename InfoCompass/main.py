@@ -58,7 +58,7 @@ class InfoCompass:
         self.telegram_client = TelegramClient('infocompass_session', self.api_id, self.api_hash)
           # 配置Gemini
         genai.configure(api_key=self.gemini_api_key)
-        self.gemini_model = genai.GenerativeModel('gemini-2.0-llash-lite')
+        self.gemini_model = genai.GenerativeModel('gemini-2.0-flash-lite')
         
         # 数据存储目录
         self.data_dir = 'data'
