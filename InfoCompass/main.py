@@ -58,7 +58,7 @@ class InfoCompass:
         self.telegram_client = TelegramClient('infocompass_session', self.api_id, self.api_hash)
           # 配置Gemini
         genai.configure(api_key=self.gemini_api_key)
-        self.gemini_model = genai.GenerativeModel('gemini-pro')
+        self.gemini_model = genai.GenerativeModel('gemini-2.0-llash-lite')
         
         # 数据存储目录
         self.data_dir = 'data'
@@ -107,18 +107,64 @@ class InfoCompass:
         try:
             # 对于公开频道，尝试不登录连接
             try:
-                await self.telegram_client.start()
-                logger.info("已连接到Telegram (无需登录)")
-            except Exception as e:
-                # 如果需要登录且有电话号码，则登录
-                if self.phone_number:
-                    logger.info("正在登录Telegram...")
-                    await self.telegram_client.start(phone=self.phone_number)
-                    logger.info("已登录到Telegram")
+                # 检查会话文件
+                session_file = 'infocompass_session.session'
+                if os.path.exists(session_file):
+                    logger.info(f"会话文件存在: {session_file}, 大小: {os.path.getsize(session_file)} 字节")
                 else:
-                    logger.warning("无法连接到Telegram，可能需要登录凭据")
-                    raise e
-            
+                    logger.info(f"会话文件不存在: {session_file}")
+
+                # 使用with语句确保客户端会正确启动和关闭
+                if not self.telegram_client.is_connected():
+                    logger.info("尝试连接到Telegram...")
+                    await self.telegram_client.connect()
+                    logger.info("已连接到Telegram客户端")
+                else:
+                    logger.info("Telegram客户端已经连接")
+
+                # 检查是否已经授权
+                is_authorized = await self.telegram_client.is_user_authorized()
+                logger.info(f"客户端授权状态: {'已授权' if is_authorized else '未授权'}")
+
+                if not is_authorized:
+                    logger.info("需要登录Telegram...")
+                    if self.phone_number:
+                        # 发送验证码
+                        await self.telegram_client.send_code_request(self.phone_number)
+                        logger.info(f"验证码已发送到 {self.phone_number}")
+
+                        # 等待用户输入验证码
+                        verification_code = input("请输入收到的验证码: ")
+
+                        try:
+                            # 尝试使用验证码登录
+                            await self.telegram_client.sign_in(self.phone_number, verification_code)
+                            logger.info("登录成功！")
+
+                            # 再次检查授权状态
+                            is_authorized = await self.telegram_client.is_user_authorized()
+                            logger.info(f"登录后授权状态: {'已授权' if is_authorized else '仍未授权'}")
+                        except Exception as sign_in_error:
+                            # 如果是两步验证，需要密码
+                            if "2FA" in str(sign_in_error) or "password" in str(sign_in_error).lower():
+                                password = input("请输入两步验证密码: ")
+                                await self.telegram_client.sign_in(password=password)
+                                logger.info("两步验证登录成功！")
+
+                                # 再次检查授权状态
+                                is_authorized = await self.telegram_client.is_user_authorized()
+                                logger.info(f"两步验证后授权状态: {'已授权' if is_authorized else '仍未授权'}")
+                            else:
+                                raise sign_in_error
+                    else:
+                        logger.warning("无法连接到Telegram，未提供电话号码")
+                        raise Exception("登录需要电话号码，请在环境变量中设置 TELEGRAM_PHONE")
+                else:
+                    logger.info("已连接到Telegram (已授权)")
+            except Exception as e:
+                logger.error(f"连接Telegram时发生错误: {str(e)}")
+                raise e
+
             logger.info(f"开始获取频道 {channel_username} 的消息")
             
             # 计算时间范围
@@ -131,7 +177,8 @@ class InfoCompass:
                 logger.error(f"无法访问频道 {channel_username}: {str(e)}")
                 logger.info("提示：确保频道名称正确且为公开频道，或您有访问权限")
                 return []
-            
+
+            messages_count = 0
             # 获取消息
             async for message in self.telegram_client.iter_messages(
                 channel, 
@@ -150,6 +197,10 @@ class InfoCompass:
                         'media_type': self._get_media_type(message.media) if message.media else None
                     }
                     messages.append(message_data)
+
+                    messages_count += 1
+                    if messages_count % 10 == 0:  # 每获取10条消息后暂停
+                        await asyncio.sleep(1)
             
             logger.info(f"成功获取 {len(messages)} 条消息")
             return messages
@@ -158,8 +209,9 @@ class InfoCompass:
             logger.error(f"获取消息时发生错误: {str(e)}")
             raise
         finally:
-            await self.telegram_client.disconnect()
-    
+            # 我们不在这里断开连接，因为可能需要处理多个频道
+            pass
+
     def _get_media_type(self, media) -> str:
         """获取媒体类型"""
         if isinstance(media, MessageMediaPhoto):
@@ -399,6 +451,7 @@ async def main():
     print("Filter noise. Distill essence. Pierce the fog.")
     print("="*50)
     
+    compass = None
     try:
         # 创建InfoCompass实例
         compass = InfoCompass()
@@ -431,23 +484,23 @@ async def main():
                     days_back = 1
                 
                 custom_prompt = input("自定义总结提示词 (可选，直接回车跳过): ").strip() or None
-                
+
                 print("\n🚀 开始批量处理...")
                 results = await compass.process_all_channels(
                     limit=limit,
                     days_back=days_back,
                     custom_prompt=custom_prompt
                 )
-                
+
                 print(f"\n✅ 批量处理完成！文件已保存到 {compass.data_dir} 目录")
                 return
-                
+
             elif choice == "2":
                 # 选择单个频道
                 print("\n请选择要处理的频道:")
                 for i, channel in enumerate(compass.channels, 1):
                     print(f"{i}. {channel}")
-                
+
                 try:
                     selection = int(input(f"\n请选择 (1-{len(compass.channels)}): ").strip())
                     if 1 <= selection <= len(compass.channels):
@@ -458,14 +511,14 @@ async def main():
                 except ValueError:
                     print("❌ 无效输入")
                     return
-                    
+
             else:
                 # 手动输入模式
                 channel = input("请输入Telegram频道用户名 (例如: @channelname): ").strip()
                 if not channel:
                     print("❌ 频道名称不能为空")
                     return
-                
+
                 if not channel.startswith('@'):
                     channel = '@' + channel
         else:
@@ -474,25 +527,25 @@ async def main():
             if not channel:
                 print("❌ 频道名称不能为空")
                 return
-            
+
             if not channel.startswith('@'):
                 channel = '@' + channel
-        
+
         # 单频道处理的参数输入
         try:
             limit = int(input("消息数量限制 (默认100): ").strip() or "100")
         except ValueError:
             limit = 100
-        
+
         try:
             days_back = int(input("获取几天前的消息 (默认1): ").strip() or "1")
         except ValueError:
             days_back = 1
-        
+
         custom_prompt = input("自定义总结提示词 (可选，直接回车跳过): ").strip() or None
-        
+
         print("\n🚀 开始处理...")
-        
+
         # 处理频道
         result = await compass.process_channel(
             channel_username=channel,
@@ -500,16 +553,24 @@ async def main():
             days_back=days_back,
             custom_prompt=custom_prompt
         )
-        
+
         if result:
             print(f"\n✅ 处理完成！文件已保存到 {compass.data_dir} 目录")
-        
+
     except KeyboardInterrupt:
         print("\n\n👋 用户取消操作")
     except Exception as e:
         print(f"\n❌ 发生错误: {str(e)}")
         logger.error(f"主程序错误: {str(e)}")
+    finally:
+        # 确保在程序结束时断开Telegram客户端连接
+        if compass and compass.telegram_client and compass.telegram_client.is_connected():
+            logger.info("正在断开Telegram客户端连接...")
+            await compass.telegram_client.disconnect()
+            logger.info("Telegram客户端已断开连接")
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
